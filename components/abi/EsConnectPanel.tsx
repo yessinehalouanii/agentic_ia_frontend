@@ -1,19 +1,33 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+
+export type EsField = {
+  field: string;
+  type: string;
+  raw?: any;
+};
 
 export type EsConnectProps = {
   backendBase: string;
+
   esUrl: string;
   setEsUrl: (v: string) => void;
-  esUsername: string;
+
+  esUsername: string; // optional
   setEsUsername: (v: string) => void;
-  esPassword: string;
+
+  esPassword: string; // optional
   setEsPassword: (v: string) => void;
+
   esIndices: string[];
   setEsIndices: (v: string[]) => void;
+
   selectedEsIndex: string;
   setSelectedEsIndex: (v: string) => void;
+
+  // ✅ NEW: parent stores schema for LLM/QA
+  onMappingLoaded?: (indexName: string, fields: EsField[]) => void;
 };
 
 export function EsConnectPanel({
@@ -28,9 +42,21 @@ export function EsConnectPanel({
   setEsIndices,
   selectedEsIndex,
   setSelectedEsIndex,
+  onMappingLoaded,
 }: EsConnectProps) {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+
+  const [mappingLoading, setMappingLoading] = useState(false);
+  const [mappingStatus, setMappingStatus] = useState<string | null>(null);
+
+  function buildAuthPayload() {
+    return {
+      base_url: esUrl.trim(),
+      username: esUsername?.trim() ? esUsername.trim() : null,
+      password: esPassword?.trim() ? esPassword : null,
+    };
+  }
 
   async function handleConnect() {
     const baseUrl = esUrl.trim();
@@ -44,7 +70,6 @@ export function EsConnectPanel({
     setStatus(null);
     setLoading(true);
 
-    // ✅ Timeout so UI never stays “Connecting…” forever
     const controller = new AbortController();
     const timeoutMs = 8000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -53,16 +78,11 @@ export function EsConnectPanel({
       const res = await fetch(`${backendBase}/es/indices/dynamic`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include", // ✅ sends cookies to your backend (not ES)
+        credentials: "include",
         signal: controller.signal,
-        body: JSON.stringify({
-          base_url: baseUrl,
-          username: esUsername?.trim() ? esUsername.trim() : null,
-          password: esPassword?.trim() ? esPassword : null,
-        }),
+        body: JSON.stringify(buildAuthPayload()),
       });
 
-      // ✅ Try JSON, fallback to text (avoids “Unexpected end of JSON input”)
       const text = await res.text();
       let data: any = null;
       try {
@@ -70,8 +90,6 @@ export function EsConnectPanel({
       } catch {
         data = { raw: text };
       }
-
-      console.log("ES /indices/dynamic response:", { status: res.status, data });
 
       if (!res.ok) {
         const msg =
@@ -81,9 +99,6 @@ export function EsConnectPanel({
         throw new Error(msg);
       }
 
-      // ✅ Support both payload shapes:
-      //   1) data is array
-      //   2) data.indices is array
       const rawIndices: any[] = Array.isArray(data)
         ? data
         : Array.isArray(data?.indices)
@@ -98,9 +113,7 @@ export function EsConnectPanel({
 
       if (names.length > 0) {
         setSelectedEsIndex(names[0]);
-        setStatus(
-          `Connected. Found ${names.length} indice${names.length === 1 ? "" : "s"}.`
-        );
+        setStatus(`Connected. Found ${names.length} indice${names.length === 1 ? "" : "s"}.`);
       } else {
         setStatus("Connected but no indices were found.");
       }
@@ -116,6 +129,46 @@ export function EsConnectPanel({
     }
   }
 
+  // ✅ Fetch mapping when selected index changes
+  useEffect(() => {
+    async function fetchMapping() {
+      const baseUrl = esUrl.trim();
+      const indexName = selectedEsIndex?.trim();
+
+      if (!baseUrl || !indexName) return;
+
+      setMappingLoading(true);
+      setMappingStatus(null);
+
+      try {
+        const res = await fetch(`${backendBase}/es/mapping/dynamic`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            ...buildAuthPayload(),
+            index_name: indexName,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.detail || `Mapping failed (${res.status})`);
+
+        const fields = Array.isArray(data?.fields) ? data.fields : [];
+        onMappingLoaded?.(indexName, fields);
+
+        setMappingStatus(`Schema loaded (${fields.length} fields).`);
+      } catch (err: any) {
+        setMappingStatus(`Schema error: ${String(err.message || err)}`);
+      } finally {
+        setMappingLoading(false);
+      }
+    }
+
+    fetchMapping();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEsIndex]);
+
   return (
     <section>
       <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
@@ -123,7 +176,6 @@ export function EsConnectPanel({
       </h2>
 
       <div className="mt-3 space-y-3 text-xs">
-        {/* ES URL */}
         <div>
           <label className="block text-[11px] font-medium text-slate-600 mb-1">
             Elasticsearch URL
@@ -172,14 +224,12 @@ export function EsConnectPanel({
           {loading ? "Connecting…" : "Connect & list indices"}
         </button>
 
-        {/* Status / error */}
         {status && (
           <div className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700">
             {status}
           </div>
         )}
 
-        {/* Indices dropdown */}
         {esIndices.length > 0 && (
           <div className="pt-1 border-t border-slate-100">
             <label className="block text-[11px] font-medium text-slate-600 mb-1 mt-2">
@@ -196,9 +246,10 @@ export function EsConnectPanel({
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-[10px] text-slate-500">
-              This index name can be used in your sample viewer or QA-over-ES mode.
-            </p>
+
+            <div className="mt-2 text-[10px] text-slate-500">
+              {mappingLoading ? "Loading schema…" : mappingStatus || "Schema not loaded yet."}
+            </div>
           </div>
         )}
       </div>
