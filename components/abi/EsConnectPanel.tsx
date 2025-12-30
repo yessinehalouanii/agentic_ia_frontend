@@ -1,6 +1,7 @@
+// components/abi/EsConnectPanel.tsx
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 
 export type EsField = {
   field: string;
@@ -23,10 +24,11 @@ export type EsConnectProps = {
   esIndices: string[];
   setEsIndices: (v: string[]) => void;
 
-  selectedEsIndex: string;
-  setSelectedEsIndex: (v: string) => void;
+  // ✅ multi-select
+  selectedEsIndices: string[];
+  setSelectedEsIndices: (v: string[]) => void;
 
-  // ✅ NEW: parent stores schema for LLM/QA
+  // ✅ parent stores schema for LLM/QA
   onMappingLoaded?: (indexName: string, fields: EsField[]) => void;
 };
 
@@ -40,15 +42,20 @@ export function EsConnectPanel({
   setEsPassword,
   esIndices,
   setEsIndices,
-  selectedEsIndex,
-  setSelectedEsIndex,
+  selectedEsIndices,
+  setSelectedEsIndices,
   onMappingLoaded,
 }: EsConnectProps) {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
-  const [mappingLoading, setMappingLoading] = useState(false);
-  const [mappingStatus, setMappingStatus] = useState<string | null>(null);
+  // ✅ mapping status per index
+  const [mappingStatusByIndex, setMappingStatusByIndex] = useState<
+    Record<string, string>
+  >({});
+  const [mappingLoadingIndex, setMappingLoadingIndex] = useState<string | null>(
+    null
+  );
 
   function buildAuthPayload() {
     return {
@@ -66,9 +73,13 @@ export function EsConnectPanel({
     }
 
     setEsIndices([]);
-    setSelectedEsIndex("");
+    setSelectedEsIndices([]);
     setStatus(null);
     setLoading(true);
+
+    // reset mapping state
+    setMappingStatusByIndex({});
+    setMappingLoadingIndex(null);
 
     const controller = new AbortController();
     const timeoutMs = 8000;
@@ -112,8 +123,11 @@ export function EsConnectPanel({
       setEsIndices(names);
 
       if (names.length > 0) {
-        setSelectedEsIndex(names[0]);
-        setStatus(`Connected. Found ${names.length} indice${names.length === 1 ? "" : "s"}.`);
+        setStatus(
+          `Connected. Found ${names.length} indice${
+            names.length === 1 ? "" : "s"
+          }.`
+        );
       } else {
         setStatus("Connected but no indices were found.");
       }
@@ -129,45 +143,65 @@ export function EsConnectPanel({
     }
   }
 
-  // ✅ Fetch mapping when selected index changes
-  useEffect(() => {
-    async function fetchMapping() {
-      const baseUrl = esUrl.trim();
-      const indexName = selectedEsIndex?.trim();
+  // ✅ fetch mapping for a single index (called when you tick the box)
+  async function fetchMappingForIndex(indexName: string) {
+    const baseUrl = esUrl.trim();
+    if (!baseUrl || !indexName) return;
 
-      if (!baseUrl || !indexName) return;
+    setMappingLoadingIndex(indexName);
+    setMappingStatusByIndex((prev) => ({
+      ...prev,
+      [indexName]: "Loading schema…",
+    }));
 
-      setMappingLoading(true);
-      setMappingStatus(null);
+    try {
+      const res = await fetch(`${backendBase}/es/mapping/dynamic`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          ...buildAuthPayload(),
+          index_name: indexName,
+        }),
+      });
 
-      try {
-        const res = await fetch(`${backendBase}/es/mapping/dynamic`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            ...buildAuthPayload(),
-            index_name: indexName,
-          }),
-        });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || `Mapping failed (${res.status})`);
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.detail || `Mapping failed (${res.status})`);
+      const fields = Array.isArray(data?.fields) ? data.fields : [];
+      onMappingLoaded?.(indexName, fields);
 
-        const fields = Array.isArray(data?.fields) ? data.fields : [];
-        onMappingLoaded?.(indexName, fields);
+      setMappingStatusByIndex((prev) => ({
+        ...prev,
+        [indexName]: `Schema loaded (${fields.length} fields).`,
+      }));
+    } catch (err: any) {
+      setMappingStatusByIndex((prev) => ({
+        ...prev,
+        [indexName]: `Schema error: ${String(err.message || err)}`,
+      }));
+    } finally {
+      setMappingLoadingIndex((curr) => (curr === indexName ? null : curr));
+    }
+  }
 
-        setMappingStatus(`Schema loaded (${fields.length} fields).`);
-      } catch (err: any) {
-        setMappingStatus(`Schema error: ${String(err.message || err)}`);
-      } finally {
-        setMappingLoading(false);
+  // ✅ toggle checkbox + lazy-load mapping on first select
+  function toggleIndex(indexName: string) {
+    const already = selectedEsIndices.includes(indexName);
+    let next: string[];
+
+    if (already) {
+      next = selectedEsIndices.filter((n) => n !== indexName);
+    } else {
+      // newly selected → trigger mapping load if not already done
+      if (!mappingStatusByIndex[indexName]) {
+        void fetchMappingForIndex(indexName);
       }
+      next = [...selectedEsIndices, indexName];
     }
 
-    fetchMapping();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEsIndex]);
+    setSelectedEsIndices(next);
+  }
 
   return (
     <section>
@@ -233,22 +267,53 @@ export function EsConnectPanel({
         {esIndices.length > 0 && (
           <div className="pt-1 border-t border-slate-100">
             <label className="block text-[11px] font-medium text-slate-600 mb-1 mt-2">
-              Choose index
+              Choose indices
             </label>
-            <select
-              className="w-full rounded border border-slate-300 px-2 py-1"
-              value={selectedEsIndex}
-              onChange={(e) => setSelectedEsIndex(e.target.value)}
-            >
-              {esIndices.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
 
-            <div className="mt-2 text-[10px] text-slate-500">
-              {mappingLoading ? "Loading schema…" : mappingStatus || "Schema not loaded yet."}
+            {/* ✅ checkbox list with hover highlight */}
+            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-slate-200 bg-white">
+              {esIndices.map((name) => {
+                const checked = selectedEsIndices.includes(name);
+                const mappingStatus = mappingStatusByIndex[name];
+                const loadingThis = mappingLoadingIndex === name;
+
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => toggleIndex(name)}
+                    className="w-full flex items-center justify-between px-2 py-1 text-left text-[11px] hover:bg-slate-50"
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-3 w-3"
+                        checked={checked}
+                        onChange={() => toggleIndex(name)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <span className="font-mono truncate max-w-[140px]">
+                        {name}
+                      </span>
+                    </div>
+
+                    {loadingThis ? (
+                      <span className="text-[10px] text-slate-400">
+                        Loading…
+                      </span>
+                    ) : mappingStatus ? (
+                      <span className="text-[10px] text-slate-400 truncate max-w-[120px]">
+                        {mappingStatus}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-1 text-[10px] text-slate-500">
+              Tick one or more indices. Schema is loaded on first tick and
+              cached.
             </div>
           </div>
         )}

@@ -48,7 +48,7 @@ export function EsSamplePanel({
   const [indexName, setIndexName] = useState<string>(selectedIndexName || "");
   const [size, setSize] = useState<number>(10);
 
-  // ✅ NEW: make flatten optional (toggle)
+  // ✅ flatten toggle
   const [flatten, setFlatten] = useState<boolean>(flattenDefault);
 
   const [rows, setRows] = useState<QaResultRow[]>([]);
@@ -59,9 +59,7 @@ export function EsSamplePanel({
     if (selectedIndexName) setIndexName(selectedIndexName);
   }, [selectedIndexName]);
 
-  // ✅ NEW: compute columns safely for both flattened & non-flattened rows
-  // - if flatten=true: dotted keys become columns naturally
-  // - if flatten=false: we still render top-level keys, and object values are JSON-stringified
+  // ✅ compute columns safely for both flattened & non-flattened rows
   const columns = useMemo(() => {
     const set = new Set<string>();
     for (const r of rows) {
@@ -90,9 +88,11 @@ export function EsSamplePanel({
     setRows([]);
 
     try {
-      // ✅ MODIFIED: flatten is now optional
+      // flatten is optional now
       const res = await fetch(
-        `${backendBase}/es/sample/dynamic?size=${size}&flatten=${flatten ? "true" : "false"}`,
+        `${backendBase}/es/sample/dynamic?size=${size}&flatten=${
+          flatten ? "true" : "false"
+        }`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -129,7 +129,9 @@ export function EsSamplePanel({
     if (!rows.length) return;
 
     const idx = (indexName || "sample").trim().replace(/[^\w\-]+/g, "_");
-    const filename = `es_${idx}_${rows.length}rows_${flatten ? "flatten" : "original"}.csv`;
+    const filename = `es_${idx}_${rows.length}rows_${
+      flatten ? "flatten" : "original"
+    }.csv`;
 
     const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -146,12 +148,16 @@ export function EsSamplePanel({
 
   return (
     <section className="mb-8">
-      <h2 className="text-lg font-semibold text-slate-900 mb-2">Elasticsearch sample viewer</h2>
+      <h2 className="text-lg font-semibold text-slate-900 mb-2">
+        Elasticsearch sample viewer
+      </h2>
 
       <div className="flex flex-col gap-3 mb-4 text-xs">
         <div className="flex flex-col md:flex-row md:items-end gap-3">
           <div className="flex-1">
-            <label className="block text-[11px] font-medium text-slate-600 mb-1">Index name</label>
+            <label className="block text-[11px] font-medium text-slate-600 mb-1">
+              Index name
+            </label>
             <input
               type="text"
               className="w-full rounded border border-slate-300 px-2 py-1"
@@ -161,7 +167,9 @@ export function EsSamplePanel({
           </div>
 
           <div className="w-28">
-            <label className="block text-[11px] font-medium text-slate-600 mb-1">Rows</label>
+            <label className="block text-[11px] font-medium text-slate-600 mb-1">
+              Rows
+            </label>
             <input
               type="number"
               className="w-full rounded border border-slate-300 px-2 py-1"
@@ -192,7 +200,7 @@ export function EsSamplePanel({
           </button>
         </div>
 
-        {/* ✅ NEW: flatten toggle */}
+        {/* flatten toggle */}
         <div className="flex items-center gap-2">
           <input
             id="es-flatten"
@@ -241,7 +249,11 @@ export function EsSamplePanel({
                     <td
                       key={col}
                       className="px-2 py-1 border-b border-slate-100 whitespace-nowrap"
-                      title={typeof (row as any)?.[col] === "object" ? prettyCell((row as any)?.[col]) : undefined}
+                      title={
+                        typeof (row as any)?.[col] === "object"
+                          ? prettyCell((row as any)?.[col])
+                          : undefined
+                      }
                     >
                       {prettyCell((row as any)?.[col])}
                     </td>
@@ -254,7 +266,9 @@ export function EsSamplePanel({
           <div className="px-3 py-1 text-[10px] text-slate-400 border-t border-slate-100">
             Showing {rows.length} documents from{" "}
             <span className="font-mono">{indexName}</span> — mode:{" "}
-            <span className="font-mono">{flatten ? "flatten=true" : "flatten=false"}</span>
+            <span className="font-mono">
+              {flatten ? "flatten=true" : "flatten=false"}
+            </span>
           </div>
         </div>
       ) : (

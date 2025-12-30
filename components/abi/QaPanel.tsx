@@ -30,6 +30,9 @@ type Props = {
   esUsername?: string;
   esPassword?: string;
   esIndexName: string;
+
+  // ✅ NEW: optional separate customers index
+  esCustomersIndexName?: string;
 };
 
 type UploadResponse = {
@@ -72,6 +75,28 @@ type EsRunDslResponse = {
   body?: any;
   hits?: Array<Record<string, any>>;
   raw?: any;
+  summary?:
+    | {
+        text?: string;
+        visits_by_year?: Record<string, number>;
+        start_year?: string;
+        end_year?: string;
+        start_value?: number;
+        end_value?: number;
+        delta?: number;
+        pct_change?: number | null;
+      }
+    | null;
+  error?: string;
+};
+
+// ✅ /es/load-index-to-tables response
+type EsLoadIndexResponse = {
+  ok?: boolean;
+  workspace_id?: string;
+  table_name?: string;
+  rows?: number;
+  cols?: number;
   error?: string;
 };
 
@@ -94,6 +119,7 @@ export function QaPanel({
   esUsername,
   esPassword,
   esIndexName,
+  esCustomersIndexName, // ✅ new prop
 }: Props) {
   const [docIds, setDocIds] = useState<string[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -102,7 +128,7 @@ export function QaPanel({
 
   const [showTips, setShowTips] = useState(true);
 
-  // ✅ NEW: ES DSL text + execution info
+  // ✅ ES DSL text + execution info
   const [esDsl, setEsDsl] = useState<string>("");
   const [esExecInfo, setEsExecInfo] = useState<string | null>(null);
 
@@ -214,11 +240,79 @@ export function QaPanel({
     }
   }
 
+  // ✅ NEW: load current ES index as a table in TABLE_STORE for this workspace
+  async function ensureEsTableForWorkspace(): Promise<boolean> {
+    const baseUrl = (esUrl || "").trim();
+    const indexName = (esIndexName || "").trim();
+
+    // If ES is not configured, just let analytics run on existing tables
+    if (!baseUrl || !indexName) {
+      return true;
+    }
+
+    try {
+      const res = await fetch(`${backendBase}/es/load-index-to-tables`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          base_url: baseUrl,
+          username: esUsername?.trim() ? esUsername.trim() : null,
+          password: esPassword?.trim() ? esPassword : null,
+          index_name: indexName,
+          workspace_id: workspaceId || "default",
+          table_name: `es_${indexName}`,
+        }),
+      });
+
+      const text = await res.text();
+      let data: EsLoadIndexResponse | null = null;
+
+      try {
+        data = text ? (JSON.parse(text) as EsLoadIndexResponse) : null;
+      } catch {
+        data = { error: text };
+      }
+
+      if (!res.ok || !data?.ok) {
+        const msg = (data && data.error) || text || `ES load failed (${res.status})`;
+        setQaResponse({
+          error: `Failed to load ES index into analytics tables: ${msg}`,
+          insight: null,
+          result: [],
+        });
+        return false;
+      }
+
+      setEsExecInfo(
+        `Loaded ES index "${indexName}" as table "${data.table_name}" (${data.rows} rows, ${data.cols} cols) in workspace "${data.workspace_id}".`
+      );
+
+      return true;
+    } catch (err: any) {
+      setQaResponse({
+        error: `Failed to load ES index into analytics tables: ${String(
+          err.message || err
+        )}`,
+        insight: null,
+        result: [],
+      });
+      return false;
+    }
+  }
+
   async function handleUseDocumentRulesApplyDb() {
     setQaLoading(true);
     setQaResponse(null);
 
     try {
+      // ✅ make sure ES index is available as a table for this workspace
+      const ok = await ensureEsTableForWorkspace();
+      if (!ok) {
+        setQaLoading(false);
+        return;
+      }
+
       const res = await fetch(`${backendBase}/docs/ask-analytics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -260,11 +354,19 @@ export function QaPanel({
     }
   }
 
+  // 🔵 Analytics (existing) – THIS is where ES params + special routes plug in
   async function handleAnalyticsExisting() {
     setQaLoading(true);
     setQaResponse(null);
 
     try {
+      // ✅ make sure ES index is available as a table for this workspace
+      const ok = await ensureEsTableForWorkspace();
+      if (!ok) {
+        setQaLoading(false);
+        return;
+      }
+
       const res = await fetch(`${backendBase}/docs/ask-analytics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -276,6 +378,13 @@ export function QaPanel({
           doc_ids: null,
           model: modelName,
           api_key: apiKeyOverride || null,
+
+          // 🔹 ES params – backend can use these for all _es_* special routes
+          es_base_url: esUrl || null,
+          es_username: esUsername?.trim() || null,
+          es_password: esPassword || null,
+          es_index_name: esIndexName || null,
+          es_customers_index_name: esCustomersIndexName || null, // ✅ NEW
         }),
       });
 
@@ -306,7 +415,7 @@ export function QaPanel({
     }
   }
 
-  // ✅ Ask ES -> generate DSL only
+  // ✅ Ask ES -> generate DSL only (optional, for debugging)
   async function handleAskEs() {
     const baseUrl = (esUrl || "").trim();
     const indexName = (esIndexName || "").trim();
@@ -356,7 +465,6 @@ export function QaPanel({
           api_key: apiKeyOverride || null,
           size: 50,
           flatten: true,
-          // run_query: false  // implicit; backend default
         }),
       });
 
@@ -382,7 +490,6 @@ export function QaPanel({
       // ✅ Put DSL in its own editable textarea
       setEsDsl(dslText);
 
-      // Optional user-facing message
       setQaResponse({
         error: null,
         insight:
@@ -396,158 +503,166 @@ export function QaPanel({
     }
   }
 
- // ✅ NEW: Run the DSL on your ES DB (with aggregations → table)
-async function handleRunEsDsl() {
-  const baseUrl = (esUrl || "").trim();
-  if (!baseUrl) {
-    setQaResponse({
-      error: "Connect to Elasticsearch first (missing ES URL).",
-      insight: null,
-      result: [],
-    });
-    return;
-  }
+  // ✅ Run the DSL on your ES DB (with aggregations → table)
+  async function handleRunEsDsl() {
+    const baseUrl = (esUrl || "").trim();
+    if (!baseUrl) {
+      setQaResponse({
+        error: "Connect to Elasticsearch first (missing ES URL).",
+        insight: null,
+        result: [],
+      });
+      return;
+    }
 
-  if (!esDsl.trim()) {
-    setQaResponse({
-      error: "No ES DSL to execute. Generate or paste a DSL first.",
-      insight: null,
-      result: [],
-    });
-    return;
-  }
+    if (!esDsl.trim()) {
+      setQaResponse({
+        error: "No ES DSL to execute. Generate or paste a DSL first.",
+        insight: null,
+        result: [],
+      });
+      return;
+    }
 
-  setQaLoading(true);
-  setQaResponse(null);
-  setEsExecInfo(null);
-
-  try {
-    const res = await fetch(`${backendBase}/es/run-dsl/dynamic`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        base_url: baseUrl,
-        username: esUsername?.trim() ? esUsername.trim() : null,
-        password: esPassword?.trim() ? esPassword : null,
-        dsl: esDsl,
-        flatten: true,
-      }),
-    });
-
-    const text = await res.text();
-    let data: EsRunDslResponse | null = null;
+    setQaLoading(true);
+    setQaResponse(null);
+    setEsExecInfo(null);
 
     try {
-      data = text ? (JSON.parse(text) as EsRunDslResponse) : null;
-    } catch {
-      data = { error: text };
-    }
+      const res = await fetch(`${backendBase}/es/run-dsl/dynamic`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          base_url: baseUrl,
+          username: esUsername?.trim() ? esUsername.trim() : null,
+          password: esPassword?.trim() ? esPassword : null,
+          dsl: esDsl,
+          flatten: true,
+        }),
+      });
 
-    if (!res.ok) {
-      const msg = (data as any)?.detail || data?.error || text || `Failed (${res.status})`;
-      throw new Error(msg);
-    }
+      const text = await res.text();
+      let data: EsRunDslResponse | null = null;
 
-    const raw = (data as any)?.raw || {};
-    const hits = data?.hits || [];
-    const aggs = raw?.aggregations || null;
-
-    // ----------------- Build rows for the table -----------------
-    let rows: Array<Record<string, any>> = [];
-    let insightText = "";
-
-    if (hits.length > 0) {
-      // Normal search: show document hits as before
-      rows = hits;
-      insightText = `ES DSL executed successfully. Showing ${Math.min(
-        rows.length,
-        50
-      )} document hit(s).`;
-    } else if (aggs) {
-      // Case 1: group_by_location + average_total_sales (terms agg)
-      if (aggs.group_by_location?.buckets) {
-        const buckets = aggs.group_by_location.buckets;
-        rows = buckets.map((b: any) => ({
-          location_id: b.key,
-          doc_count: b.doc_count,
-          average_total_sales: b.average_total_sales?.value ?? null,
-        }));
-
-        const preview = rows
-          .slice(0, 3)
-          .map(
-            (r) =>
-              `location_id ${r.location_id}: ${Number(
-                r.average_total_sales
-              ).toFixed(2)}`
-          )
-          .join(" · ");
-
-        insightText =
-          rows.length > 0
-            ? `Average total sales per location_id. First locations: ${preview}${
-                rows.length > 3 ? " …" : ""
-              }`
-            : "ES DSL executed successfully, but no locations were returned in the aggregation.";
+      try {
+        data = text ? (JSON.parse(text) as EsRunDslResponse) : null;
+      } catch {
+        data = { error: text };
       }
-      // Case 2: simple avg aggregation: { "average_total_sales": { "value": ... } }
-      else if (
-        aggs.average_total_sales &&
-        aggs.average_total_sales.value !== undefined
-      ) {
-        rows = [
-          {
-            metric: "average_total_sales",
-            value: aggs.average_total_sales.value,
-          },
-        ];
-        insightText =
-          "ES DSL executed successfully. Showing average_total_sales aggregation.";
+
+      if (!res.ok) {
+        const msg = (data as any)?.detail || data?.error || text || `Failed (${res.status})`;
+        throw new Error(msg);
       }
-      // Case 3: fallback – unknown aggregation shape, just dump JSON
-      else {
-        rows = [
-          {
-            aggregations: JSON.stringify(aggs),
-          },
-        ];
+
+      const raw = (data as any)?.raw || {};
+      const hits = data?.hits || [];
+      const aggs = raw?.aggregations || null;
+      const summary = (data as any)?.summary || null;
+
+      let rows: Array<Record<string, any>> = [];
+      let insightText = "";
+
+      if (hits.length > 0) {
+        // Case 1: regular document hits
+        rows = hits;
+        insightText = `ES DSL executed successfully. Showing ${Math.min(
+          rows.length,
+          50
+        )} document hit(s).`;
+      } else if (aggs) {
+        // Case 2: aggregations only
+        if (aggs.group_by_location?.buckets) {
+          const buckets = aggs.group_by_location.buckets;
+          rows = buckets.map((b: any) => ({
+            location_id: b.key,
+            doc_count: b.doc_count,
+            average_total_sales: b.average_total_sales?.value ?? null,
+          }));
+
+          const preview = rows
+            .slice(0, 3)
+            .map(
+              (r) =>
+                `location_id ${r.location_id}: ${Number(
+                  r.average_total_sales
+                ).toFixed(2)}`
+            )
+            .join(" · ");
+
+          insightText =
+            rows.length > 0
+              ? `Average total sales per location_id. First locations: ${preview}${
+                  rows.length > 3 ? " …" : ""
+                }`
+              : "ES DSL executed successfully, but no locations were returned in the aggregation.";
+        } else if (
+          aggs.average_total_sales &&
+          aggs.average_total_sales.value !== undefined
+        ) {
+          rows = [
+            {
+              metric: "average_total_sales",
+              value: aggs.average_total_sales.value,
+            },
+          ];
+          insightText =
+            "ES DSL executed successfully. Showing average_total_sales aggregation.";
+        } else {
+          rows = [
+            {
+              aggregations: JSON.stringify(aggs),
+            },
+          ];
+          insightText =
+            "ES DSL executed successfully. Showing raw aggregations JSON (unrecognized agg shape).";
+        }
+      } else {
+        // Case 3: no hits or aggs
         insightText =
-          "ES DSL executed successfully. Showing raw aggregations JSON (unrecognized agg shape).";
+          "ES DSL executed successfully, but no document hits or aggregations were returned.";
+        rows = [];
       }
-    } else {
-      // No hits and no aggregations
-      insightText =
-        "ES DSL executed successfully, but no document hits or aggregations were returned.";
-      rows = [];
+
+      // 👇 Prefer backend summary if present (for visits per year)
+      if (summary && summary.text) {
+        insightText = summary.text as string;
+
+        if (!rows.length && summary.visits_by_year) {
+          // ✅ NEW: sort visits_by_year rows by year ascending
+          rows = Object.entries(summary.visits_by_year)
+            .sort(([y1], [y2]) => Number(y1) - Number(y2))
+            .map(([year, value]: [string, any]) => ({
+              year,
+              distinct_visits: value,
+            }));
+        }
+      }
+
+      const totalObj = raw?.total ?? null;
+      const totalPretty =
+        typeof totalObj === "object" && totalObj !== null
+          ? `${totalObj.value} (${totalObj.relation})`
+          : totalObj ?? "0";
+
+      setEsExecInfo(
+        `Executed on index "${data?.index ?? "?"}". Took: ${
+          raw?.took ?? "?"
+        } ms. Matched: ${totalPretty}`
+      );
+
+      setQaResponse({
+        error: null,
+        insight: insightText,
+        result: rows,
+      });
+    } catch (err: any) {
+      setQaResponse({ error: String(err.message || err), insight: null, result: [] });
+    } finally {
+      setQaLoading(false);
     }
-
-    // ----------------- Exec info (top-right grey text) -----------------
-    const totalObj = raw?.total ?? null;
-    const totalPretty =
-      typeof totalObj === "object" && totalObj !== null
-        ? `${totalObj.value} (${totalObj.relation})`
-        : totalObj ?? "0";
-
-    setEsExecInfo(
-      `Executed on index "${data?.index ?? "?"}". Took: ${
-        raw?.took ?? "?"
-      } ms. Matched: ${totalPretty}`
-    );
-
-    // Feed rows into the existing table below
-    setQaResponse({
-      error: null,
-      insight: insightText,
-      result: rows,
-    });
-  } catch (err: any) {
-    setQaResponse({ error: String(err.message || err), insight: null, result: [] });
-  } finally {
-    setQaLoading(false);
   }
-}
-
 
   return (
     <section className="bg-white shadow-sm rounded-2xl border border-slate-200 p-6 max-w-3xl">
@@ -629,8 +744,8 @@ async function handleRunEsDsl() {
           {showTips && (
             <ul className="mt-2 list-disc pl-5 text-sm text-amber-900 space-y-1">
               <li>
-                Use clear headings like <b>Definitions</b>, <b>Formulas</b>, <b>Examples</b>,{" "}
-                <b>Exceptions</b>.
+                Use clear headings like <b>Definitions</b>, <b>Formulas</b>,{" "}
+                <b>Examples</b>, <b>Exceptions</b>.
               </li>
               <li>
                 For rules, write them as short lines: <b>Rule:</b> … / <b>Then:</b> …{" "}
@@ -643,21 +758,24 @@ async function handleRunEsDsl() {
               </li>
               <li>Add an example input/output (it boosts retrieval a lot).</li>
               <li>
-                If you want Analytics to work well, include a <b>Field mapping</b> section (doc
-                terms → DB columns).
+                If you want Analytics to work well, include a <b>Field mapping</b>{" "}
+                section (doc terms → DB columns).
               </li>
             </ul>
           )}
 
           <div className="mt-2 text-[12px] text-amber-800">
-            No strict format required — these are just best practices to reduce confusion/hallucination.
+            No strict format required — these are just best practices to reduce
+            confusion/hallucination.
           </div>
         </div>
       </div>
 
       <div className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Question</label>
+          <label className="block text-sm font-medium text-slate-700 mb-1">
+            Question
+          </label>
           <input
             type="text"
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
@@ -670,7 +788,9 @@ async function handleRunEsDsl() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">LLM model</label>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              LLM model
+            </label>
             <input
               type="text"
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"

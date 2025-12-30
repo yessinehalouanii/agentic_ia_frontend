@@ -3,7 +3,12 @@
 
 import React, { useState } from "react";
 import { useBackendBase } from "@/components/abi/useBackendConfig";
-import { TableMeta, QaResultRow, Endpoint, QaResponse } from "@/components/abi/types";
+import {
+  TableMeta,
+  QaResultRow,
+  Endpoint,
+  QaResponse,
+} from "@/components/abi/types";
 
 import { AuthPanel } from "@/components/abi/AuthPanel";
 import { EndpointsPanel } from "@/components/abi/EndpointsPanel";
@@ -12,6 +17,7 @@ import { QaPanel } from "@/components/abi/QaPanel";
 
 import { EsSamplePanel } from "@/components/abi/EsSamplePanel";
 import { EsConnectPanel, EsField } from "@/components/abi/EsConnectPanel";
+import { EsDashboardPanel } from "@/components/abi/EsDashboardPanel";
 
 export default function HomePage() {
   const backendBase = useBackendBase();
@@ -27,9 +33,9 @@ export default function HomePage() {
 
   // BI tables
   const [tablesMeta, setTablesMeta] = useState<TableMeta[]>([]);
-  const [tablePreviews, setTablePreviews] = useState<Record<string, QaResultRow[]>>(
-    {}
-  );
+  const [tablePreviews, setTablePreviews] = useState<
+    Record<string, QaResultRow[]>
+  >({});
 
   // QA
   const [question, setQuestion] = useState("");
@@ -42,11 +48,23 @@ export default function HomePage() {
   const [esUrl, setEsUrl] = useState("");
   const [esUsername, setEsUsername] = useState(""); // optional
   const [esPassword, setEsPassword] = useState(""); // optional
-  const [esIndices, setEsIndices] = useState<string[]>([]);
-  const [selectedEsIndex, setSelectedEsIndex] = useState<string>("");
 
-  // store schema fields for selected index (optional, debug)
-  const [esFields, setEsFields] = useState<EsField[]>([]);
+  const [esIndices, setEsIndices] = useState<string[]>([]);
+
+  // 🔁 allow selecting MULTIPLE indices
+  const [selectedEsIndices, setSelectedEsIndices] = useState<string[]>([]);
+
+  // 🔁 store schema per index
+  const [esFieldsByIndex, setEsFieldsByIndex] = useState<
+    Record<string, EsField[]>
+  >({});
+
+  // ✅ derived: primary = first selected, secondary = second
+  const primaryEsIndex = selectedEsIndices[0] || "";
+  const secondaryEsIndex = selectedEsIndices[1] || ""; // ✅ NEW: for customers
+  const primaryFieldsCount = primaryEsIndex
+    ? esFieldsByIndex[primaryEsIndex]?.length || 0
+    : 0;
 
   return (
     <div className="min-h-screen bg-slate-50 flex">
@@ -58,6 +76,7 @@ export default function HomePage() {
           setIsLoggedIn={setIsLoggedIn}
         />
 
+        {/* EsConnectPanel uses multi-select indices */}
         <EsConnectPanel
           backendBase={backendBase}
           esUrl={esUrl}
@@ -68,9 +87,14 @@ export default function HomePage() {
           setEsPassword={setEsPassword}
           esIndices={esIndices}
           setEsIndices={setEsIndices}
-          selectedEsIndex={selectedEsIndex}
-          setSelectedEsIndex={setSelectedEsIndex}
-          onMappingLoaded={(_, fields) => setEsFields(fields)}
+          selectedEsIndices={selectedEsIndices}
+          setSelectedEsIndices={setSelectedEsIndices}
+          onMappingLoaded={(indexName, fields) =>
+            setEsFieldsByIndex((prev) => ({
+              ...prev,
+              [indexName]: fields,
+            }))
+          }
         />
 
         <EndpointsPanel
@@ -94,10 +118,22 @@ export default function HomePage() {
             📊 Agentic BI
           </h1>
 
-          {selectedEsIndex && (
+          {/* show multiple selected indices + primary + field count */}
+          {selectedEsIndices.length > 0 && (
             <p className="mt-2 text-xs text-slate-500">
-              ES index: <span className="font-mono">{selectedEsIndex}</span> • schema fields:{" "}
-              <span className="font-mono">{esFields.length}</span>
+              ES indices:{" "}
+              <span className="font-mono">
+                {selectedEsIndices.join(", ")}
+              </span>
+              {primaryEsIndex && (
+                <>
+                  {" "}
+                  • primary:{" "}
+                  <span className="font-mono">{primaryEsIndex}</span>
+                  {" • schema fields: "}
+                  <span className="font-mono">{primaryFieldsCount}</span>
+                </>
+              )}
             </p>
           )}
         </header>
@@ -108,14 +144,40 @@ export default function HomePage() {
           tablePreviews={tablePreviews}
         />
 
-        <div className="mt-8">
-          <EsSamplePanel
-            esUrl={esUrl}
-            esUsername={esUsername}
-            esPassword={esPassword}
-            selectedIndexName={selectedEsIndex}
-          />
+        {/* preview ALL selected indices instead of a single one */}
+        <div className="mt-8 space-y-6">
+          {selectedEsIndices.length > 0 ? (
+            selectedEsIndices.map((idx) => (
+              <EsSamplePanel
+                key={idx}
+                esUrl={esUrl}
+                esUsername={esUsername}
+                esPassword={esPassword}
+                selectedIndexName={idx}
+              />
+            ))
+          ) : (
+            <EsSamplePanel
+              esUrl={esUrl}
+              esUsername={esUsername}
+              esPassword={esPassword}
+              selectedIndexName={""}
+            />
+          )}
         </div>
+
+        {/* Dashboard: still using primary index for now */}
+        {esUrl && primaryEsIndex && (
+          <div className="mt-8">
+            <EsDashboardPanel
+              backendBase={backendBase}
+              esUrl={esUrl}
+              esUsername={esUsername}
+              esPassword={esPassword}
+              esIndexName={primaryEsIndex}
+            />
+          </div>
+        )}
 
         <div className="mt-8">
           <QaPanel
@@ -132,11 +194,12 @@ export default function HomePage() {
             setQaLoading={setQaLoading}
             qaResponse={qaResponse}
             setQaResponse={setQaResponse}
-            // ✅ NEW (Ask ES)
+            // ✅ ES context: send primary + secondary to backend
             esUrl={esUrl}
             esUsername={esUsername}
             esPassword={esPassword}
-            esIndexName={selectedEsIndex}
+            esIndexName={primaryEsIndex}
+            esCustomersIndexName={secondaryEsIndex} // ✅ NEW
           />
         </div>
       </main>
